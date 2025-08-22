@@ -1,0 +1,605 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>broker: Go Coverage Report</title>
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">github.com/YCLstock/transaction-watcher/broker/broker.go (87.4%)</option>
+				
+				<option value="file1">github.com/YCLstock/transaction-watcher/broker/types.go (100.0%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">not covered</span>
+				<span class="cov8">covered</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">package broker
+
+import (
+        "context"
+        "fmt"
+        "sync"
+        "sync/atomic"
+        "time"
+)
+
+// SimpleBroker 是一個高性能的內存消息代理實現
+type SimpleBroker struct {
+        // 使用 sync.Map 來實現無鎖的並發安全 map
+        queues      sync.Map // map[string]*messageQueue
+        subscribers sync.Map // map[string]*subscriberManager
+        deadLetters sync.Map // map[string][]Message
+        
+        metrics *Metrics
+        closed  int32
+        ctx     context.Context
+        cancel  context.CancelFunc
+}
+
+// messageQueue 表示一個消息隊列的實現
+type messageQueue struct {
+        name     string
+        messages chan Message
+        stats    *QueueStats
+        mu       sync.RWMutex
+}
+
+// subscriberManager 管理一個主題的所有訂閱者
+type subscriberManager struct {
+        topic       string
+        subscribers []chan Message
+        mu          sync.RWMutex
+}
+
+// NewSimpleBroker 創建一個新的 SimpleBroker 實例
+func NewSimpleBroker() *SimpleBroker <span class="cov8" title="1">{
+        ctx, cancel := context.WithCancel(context.Background())
+        
+        return &amp;SimpleBroker{
+                metrics: NewMetrics(),
+                ctx:     ctx,
+                cancel:  cancel,
+        }
+}</span>
+
+// Push 將消息推送到指定隊列 (Queue 模式 - 點對點)
+func (b *SimpleBroker) Push(queue string, msg Message) error <span class="cov8" title="1">{
+        if atomic.LoadInt32(&amp;b.closed) == 1 </span><span class="cov8" title="1">{
+                return fmt.Errorf("broker is closed")
+        }</span>
+        
+        <span class="cov8" title="1">msg.Queue = queue
+        msg.Timestamp = time.Now()
+        
+        // 獲取或創建隊列
+        queueInterface, _ := b.queues.LoadOrStore(queue, b.createMessageQueue(queue))
+        mq := queueInterface.(*messageQueue)
+        
+        // 使用 select 實現非阻塞發送，避免死鎖
+        select </span>{
+        case mq.messages &lt;- msg:<span class="cov8" title="1">
+                // 成功發送，更新統計
+                atomic.AddInt64(&amp;mq.stats.MessageCount, 1)
+                atomic.AddInt64(&amp;mq.stats.EnqueuedTotal, 1)
+                b.metrics.IncrementTotalMessages()
+                return nil</span>
+        default:<span class="cov0" title="0">
+                // 隊列已滿，移動到死信隊列
+                return b.MoveToDLQ(queue, msg)</span>
+        }
+}
+
+// Pull 從指定隊列拉取消息 (Queue 模式 - 點對點)
+func (b *SimpleBroker) Pull(queue string) (*Message, error) <span class="cov8" title="1">{
+        return b.PullWithTimeout(queue, 0)
+}</span>
+
+// PullWithTimeout 從指定隊列拉取消息，支持超時
+func (b *SimpleBroker) PullWithTimeout(queue string, timeout time.Duration) (*Message, error) <span class="cov8" title="1">{
+        if atomic.LoadInt32(&amp;b.closed) == 1 </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("broker is closed")
+        }</span>
+        
+        <span class="cov8" title="1">queueInterface, exists := b.queues.Load(queue)
+        if !exists </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("queue %s does not exist", queue)
+        }</span>
+        
+        <span class="cov8" title="1">mq := queueInterface.(*messageQueue)
+        
+        if timeout == 0 </span><span class="cov8" title="1">{
+                // 非阻塞模式
+                select </span>{
+                case msg := &lt;-mq.messages:<span class="cov8" title="1">
+                        atomic.AddInt64(&amp;mq.stats.MessageCount, -1)
+                        atomic.AddInt64(&amp;mq.stats.DequeuedTotal, 1)
+                        b.metrics.IncrementProcessedMessages()
+                        return &amp;msg, nil</span>
+                default:<span class="cov0" title="0">
+                        return nil, nil</span> // 沒有消息
+                }
+        }
+        
+        // 阻塞模式，支持超時
+        <span class="cov8" title="1">ctx, cancel := context.WithTimeout(b.ctx, timeout)
+        defer cancel()
+        
+        select </span>{
+        case msg := &lt;-mq.messages:<span class="cov0" title="0">
+                atomic.AddInt64(&amp;mq.stats.MessageCount, -1)
+                atomic.AddInt64(&amp;mq.stats.DequeuedTotal, 1)
+                b.metrics.IncrementProcessedMessages()
+                return &amp;msg, nil</span>
+        case &lt;-ctx.Done():<span class="cov8" title="1">
+                return nil, fmt.Errorf("timeout waiting for message from queue %s", queue)</span>
+        }
+}
+
+// Publish 發布消息到指定主題 (Pub/Sub 模式 - 廣播)
+func (b *SimpleBroker) Publish(topic string, msg Message) error <span class="cov8" title="1">{
+        if atomic.LoadInt32(&amp;b.closed) == 1 </span><span class="cov8" title="1">{
+                return fmt.Errorf("broker is closed")
+        }</span>
+        
+        <span class="cov8" title="1">msg.Timestamp = time.Now()
+        b.metrics.IncrementTotalMessages()
+        
+        subMgrInterface, exists := b.subscribers.Load(topic)
+        if !exists </span><span class="cov0" title="0">{
+                // 沒有訂閱者，直接返回
+                return nil
+        }</span>
+        
+        <span class="cov8" title="1">subMgr := subMgrInterface.(*subscriberManager)
+        subMgr.mu.RLock()
+        defer subMgr.mu.RUnlock()
+        
+        // 向所有訂閱者廣播消息
+        for _, subscriber := range subMgr.subscribers </span><span class="cov8" title="1">{
+                select </span>{
+                case subscriber &lt;- msg:<span class="cov8" title="1"></span>
+                        // 成功發送
+                default:<span class="cov0" title="0"></span>
+                        // 訂閱者的緩衝區已滿，跳過
+                }
+        }
+        
+        <span class="cov8" title="1">return nil</span>
+}
+
+// Subscribe 訂閱指定主題
+func (b *SimpleBroker) Subscribe(topic string) (&lt;-chan Message, error) <span class="cov8" title="1">{
+        if atomic.LoadInt32(&amp;b.closed) == 1 </span><span class="cov8" title="1">{
+                return nil, fmt.Errorf("broker is closed")
+        }</span>
+        
+        // 創建一個有緩衝的通道給訂閱者
+        <span class="cov8" title="1">subscriberChan := make(chan Message, 100)
+        
+        // 獲取或創建訂閱管理器
+        subMgrInterface, _ := b.subscribers.LoadOrStore(topic, &amp;subscriberManager{
+                topic:       topic,
+                subscribers: make([]chan Message, 0),
+        })
+        
+        subMgr := subMgrInterface.(*subscriberManager)
+        subMgr.mu.Lock()
+        subMgr.subscribers = append(subMgr.subscribers, subscriberChan)
+        subMgr.mu.Unlock()
+        
+        atomic.AddInt32(&amp;b.metrics.ActiveConsumers, 1)
+        
+        return subscriberChan, nil</span>
+}
+
+// Unsubscribe 取消訂閱
+func (b *SimpleBroker) Unsubscribe(topic string, subscriber &lt;-chan Message) error <span class="cov8" title="1">{
+        subMgrInterface, exists := b.subscribers.Load(topic)
+        if !exists </span><span class="cov0" title="0">{
+                return fmt.Errorf("topic %s does not exist", topic)
+        }</span>
+        
+        <span class="cov8" title="1">subMgr := subMgrInterface.(*subscriberManager)
+        subMgr.mu.Lock()
+        defer subMgr.mu.Unlock()
+        
+        // 找到並移除訂閱者
+        for i, sub := range subMgr.subscribers </span><span class="cov8" title="1">{
+                if sub == subscriber </span><span class="cov8" title="1">{
+                        subMgr.subscribers = append(subMgr.subscribers[:i], subMgr.subscribers[i+1:]...)
+                        close(sub)
+                        atomic.AddInt32(&amp;b.metrics.ActiveConsumers, -1)
+                        break</span>
+                }
+        }
+        
+        <span class="cov8" title="1">return nil</span>
+}
+
+// GetDLQ 獲取指定隊列的死信消息
+func (b *SimpleBroker) GetDLQ(queue string) []Message <span class="cov8" title="1">{
+        dlqInterface, exists := b.deadLetters.Load(queue)
+        if !exists </span><span class="cov0" title="0">{
+                return []Message{}
+        }</span>
+        
+        <span class="cov8" title="1">return dlqInterface.([]Message)</span>
+}
+
+// MoveToDLQ 將消息移動到死信隊列
+func (b *SimpleBroker) MoveToDLQ(queue string, msg Message) error <span class="cov8" title="1">{
+        msg.Attempts++
+        
+        dlqInterface, _ := b.deadLetters.LoadOrStore(queue, []Message{})
+        dlq := dlqInterface.([]Message)
+        dlq = append(dlq, msg)
+        b.deadLetters.Store(queue, dlq)
+        
+        // 更新統計
+        queueInterface, exists := b.queues.Load(queue)
+        if exists </span><span class="cov0" title="0">{
+                mq := queueInterface.(*messageQueue)
+                atomic.AddInt64(&amp;mq.stats.DeadLetterCount, 1)
+        }</span>
+        
+        <span class="cov8" title="1">b.metrics.IncrementFailedMessages()
+        return nil</span>
+}
+
+// ReprocessDLQ 重新處理死信隊列中的消息
+func (b *SimpleBroker) ReprocessDLQ(queue string, msgID string) error <span class="cov8" title="1">{
+        dlqInterface, exists := b.deadLetters.Load(queue)
+        if !exists </span><span class="cov0" title="0">{
+                return fmt.Errorf("no dead letters for queue %s", queue)
+        }</span>
+        
+        <span class="cov8" title="1">dlq := dlqInterface.([]Message)
+        for i, msg := range dlq </span><span class="cov8" title="1">{
+                if msg.ID == msgID </span><span class="cov8" title="1">{
+                        // 重置嘗試次數
+                        msg.Attempts = 0
+                        
+                        // 從死信隊列中移除
+                        dlq = append(dlq[:i], dlq[i+1:]...)
+                        b.deadLetters.Store(queue, dlq)
+                        
+                        // 重新推送到隊列
+                        return b.Push(queue, msg)
+                }</span>
+        }
+        
+        <span class="cov0" title="0">return fmt.Errorf("message %s not found in dead letter queue", msgID)</span>
+}
+
+// GetQueueStats 獲取指定隊列的統計信息
+func (b *SimpleBroker) GetQueueStats(queue string) (*QueueStats, error) <span class="cov8" title="1">{
+        queueInterface, exists := b.queues.Load(queue)
+        if !exists </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("queue %s does not exist", queue)
+        }</span>
+        
+        <span class="cov8" title="1">mq := queueInterface.(*messageQueue)
+        return &amp;QueueStats{
+                Name:            mq.stats.Name,
+                MessageCount:    atomic.LoadInt64(&amp;mq.stats.MessageCount),
+                ConsumerCount:   atomic.LoadInt32(&amp;mq.stats.ConsumerCount),
+                EnqueuedTotal:   atomic.LoadInt64(&amp;mq.stats.EnqueuedTotal),
+                DequeuedTotal:   atomic.LoadInt64(&amp;mq.stats.DequeuedTotal),
+                DeadLetterCount: atomic.LoadInt64(&amp;mq.stats.DeadLetterCount),
+        }, nil</span>
+}
+
+// GetMetrics 獲取 Broker 的整體指標
+func (b *SimpleBroker) GetMetrics() *Metrics <span class="cov0" title="0">{
+        return b.metrics
+}</span>
+
+// GetAllQueues 獲取所有隊列名稱
+func (b *SimpleBroker) GetAllQueues() []string <span class="cov8" title="1">{
+        var queues []string
+        b.queues.Range(func(key, value interface{}) bool </span><span class="cov8" title="1">{
+                queues = append(queues, key.(string))
+                return true
+        }</span>)
+        <span class="cov8" title="1">return queues</span>
+}
+
+// PurgeQueue 清空指定隊列
+func (b *SimpleBroker) PurgeQueue(queue string) error <span class="cov8" title="1">{
+        queueInterface, exists := b.queues.Load(queue)
+        if !exists </span><span class="cov0" title="0">{
+                return fmt.Errorf("queue %s does not exist", queue)
+        }</span>
+        
+        <span class="cov8" title="1">mq := queueInterface.(*messageQueue)
+        
+        // 清空隊列中的所有消息
+        for </span><span class="cov8" title="1">{
+                select </span>{
+                case &lt;-mq.messages:<span class="cov8" title="1">
+                        atomic.AddInt64(&amp;mq.stats.MessageCount, -1)</span>
+                default:<span class="cov8" title="1">
+                        return nil</span> // 隊列已空
+                }
+        }
+}
+
+// IsHealthy 檢查 Broker 是否健康
+func (b *SimpleBroker) IsHealthy() bool <span class="cov8" title="1">{
+        return atomic.LoadInt32(&amp;b.closed) == 0
+}</span>
+
+// Close 關閉 Broker
+func (b *SimpleBroker) Close() error <span class="cov8" title="1">{
+        if !atomic.CompareAndSwapInt32(&amp;b.closed, 0, 1) </span><span class="cov0" title="0">{
+                return fmt.Errorf("broker is already closed")
+        }</span>
+        
+        <span class="cov8" title="1">b.cancel()
+        
+        // 關閉所有訂閱者通道
+        b.subscribers.Range(func(key, value interface{}) bool </span><span class="cov8" title="1">{
+                subMgr := value.(*subscriberManager)
+                subMgr.mu.Lock()
+                for _, subscriber := range subMgr.subscribers </span><span class="cov8" title="1">{
+                        close(subscriber)
+                }</span>
+                <span class="cov8" title="1">subMgr.mu.Unlock()
+                return true</span>
+        })
+        
+        <span class="cov8" title="1">return nil</span>
+}
+
+// createMessageQueue 創建一個新的消息隊列
+func (b *SimpleBroker) createMessageQueue(name string) *messageQueue <span class="cov8" title="1">{
+        stats := &amp;QueueStats{
+                Name: name,
+        }
+        
+        // 更新 metrics 中的隊列統計
+        b.metrics.mu.Lock()
+        b.metrics.QueueMetrics[name] = stats
+        b.metrics.mu.Unlock()
+        atomic.AddInt32(&amp;b.metrics.ActiveQueues, 1)
+        
+        return &amp;messageQueue{
+                name:     name,
+                messages: make(chan Message, 1000), // 1000 緩衝大小
+                stats:    stats,
+        }
+}</pre>
+		
+		<pre class="file" id="file1" style="display: none">package broker
+
+import (
+        "sync"
+        "sync/atomic"
+        "time"
+)
+
+// Message 表示訊息佇列中的基本消息單元
+type Message struct {
+        ID        string            `json:"id"`
+        Body      []byte            `json:"body"`
+        Headers   map[string]string `json:"headers,omitempty"`
+        Timestamp time.Time         `json:"timestamp"`
+        Attempts  int               `json:"attempts"`
+        MaxRetry  int               `json:"max_retry"`
+        Queue     string            `json:"queue"`
+}
+
+// Queue 表示一個消息隊列的統計信息
+type QueueStats struct {
+        Name           string `json:"name"`
+        MessageCount   int64  `json:"message_count"`
+        ConsumerCount  int32  `json:"consumer_count"`
+        EnqueuedTotal  int64  `json:"enqueued_total"`
+        DequeuedTotal  int64  `json:"dequeued_total"`
+        DeadLetterCount int64  `json:"dead_letter_count"`
+}
+
+// Metrics 包含 Broker 的運行指標
+type Metrics struct {
+        // 使用 atomic 操作保證線程安全
+        TotalMessages     int64 // 總消息數
+        ProcessedMessages int64 // 已處理消息數
+        FailedMessages    int64 // 失敗消息數
+        ActiveQueues      int32 // 活躍隊列數
+        ActiveConsumers   int32 // 活躍消費者數
+        StartTime         time.Time
+        mu                sync.RWMutex
+        QueueMetrics      map[string]*QueueStats
+}
+
+// IncrementTotalMessages 原子性地增加總消息數
+func (m *Metrics) IncrementTotalMessages() <span class="cov8" title="1">{
+        atomic.AddInt64(&amp;m.TotalMessages, 1)
+}</span>
+
+// IncrementProcessedMessages 原子性地增加已處理消息數
+func (m *Metrics) IncrementProcessedMessages() <span class="cov8" title="1">{
+        atomic.AddInt64(&amp;m.ProcessedMessages, 1)
+}</span>
+
+// IncrementFailedMessages 原子性地增加失敗消息數
+func (m *Metrics) IncrementFailedMessages() <span class="cov8" title="1">{
+        atomic.AddInt64(&amp;m.FailedMessages, 1)
+}</span>
+
+// GetStats 返回當前統計信息的快照
+func (m *Metrics) GetStats() map[string]interface{} <span class="cov8" title="1">{
+        m.mu.RLock()
+        defer m.mu.RUnlock()
+        
+        return map[string]interface{}{
+                "total_messages":     atomic.LoadInt64(&amp;m.TotalMessages),
+                "processed_messages": atomic.LoadInt64(&amp;m.ProcessedMessages),
+                "failed_messages":    atomic.LoadInt64(&amp;m.FailedMessages),
+                "active_queues":      atomic.LoadInt32(&amp;m.ActiveQueues),
+                "active_consumers":   atomic.LoadInt32(&amp;m.ActiveConsumers),
+                "uptime_seconds":     time.Since(m.StartTime).Seconds(),
+                "queue_metrics":      m.copyQueueMetrics(),
+        }
+}</span>
+
+// copyQueueMetrics 創建隊列指標的副本
+func (m *Metrics) copyQueueMetrics() map[string]*QueueStats <span class="cov8" title="1">{
+        result := make(map[string]*QueueStats)
+        for name, stats := range m.QueueMetrics </span><span class="cov8" title="1">{
+                result[name] = &amp;QueueStats{
+                        Name:            stats.Name,
+                        MessageCount:    atomic.LoadInt64(&amp;stats.MessageCount),
+                        ConsumerCount:   atomic.LoadInt32(&amp;stats.ConsumerCount),
+                        EnqueuedTotal:   atomic.LoadInt64(&amp;stats.EnqueuedTotal),
+                        DequeuedTotal:   atomic.LoadInt64(&amp;stats.DequeuedTotal),
+                        DeadLetterCount: atomic.LoadInt64(&amp;stats.DeadLetterCount),
+                }
+        }</span>
+        <span class="cov8" title="1">return result</span>
+}
+
+// Broker 定義消息代理的核心接口
+type Broker interface {
+        // Queue 模式 (點對點)
+        Push(queue string, msg Message) error
+        Pull(queue string) (*Message, error)
+        PullWithTimeout(queue string, timeout time.Duration) (*Message, error)
+        
+        // Pub/Sub 模式 (廣播)
+        Publish(topic string, msg Message) error
+        Subscribe(topic string) (&lt;-chan Message, error)
+        Unsubscribe(topic string, subscriber &lt;-chan Message) error
+        
+        // Dead Letter Queue 處理
+        GetDLQ(queue string) []Message
+        MoveToDLQ(queue string, msg Message) error
+        ReprocessDLQ(queue string, msgID string) error
+        
+        // 管理和監控
+        GetQueueStats(queue string) (*QueueStats, error)
+        GetMetrics() *Metrics
+        GetAllQueues() []string
+        PurgeQueue(queue string) error
+        
+        // 生命周期管理
+        Close() error
+        IsHealthy() bool
+}
+
+// SubscriberInfo 存儲訂閱者信息
+type SubscriberInfo struct {
+        Channel   chan Message
+        Topic     string
+        CreatedAt time.Time
+}
+
+// NewMetrics 創建新的指標實例
+func NewMetrics() *Metrics <span class="cov8" title="1">{
+        return &amp;Metrics{
+                StartTime:    time.Now(),
+                QueueMetrics: make(map[string]*QueueStats),
+        }
+}</span>
+
+// NewMessage 創建新的消息實例
+func NewMessage(id string, body []byte, queue string) Message <span class="cov8" title="1">{
+        return Message{
+                ID:        id,
+                Body:      body,
+                Headers:   make(map[string]string),
+                Timestamp: time.Now(),
+                Attempts:  0,
+                MaxRetry:  3, // 默認重試3次
+                Queue:     queue,
+        }
+}</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>
